@@ -207,6 +207,23 @@ for label, val in metrics:
 st.markdown('<h1 class="hero-title">INTELLIDOCS</h1>', unsafe_allow_html=True)
 st.markdown('<p class="hero-subtitle">Cognitive Retrieval-Augmented Generation (RAG) System</p>', unsafe_allow_html=True)
 
+# Mobile-friendly instructional banner to guide users to the sidebar
+st.markdown("""
+    <div style="
+        background: rgba(99, 102, 241, 0.08); 
+        border: 1px solid rgba(99, 102, 241, 0.2); 
+        border-radius: 12px; 
+        padding: 1rem; 
+        margin-bottom: 2rem; 
+        text-align: center;
+        backdrop-filter: blur(10px);
+    ">
+        <span style="font-weight: 600; color: #A855F7; font-size: 0.95rem;">💡 Getting Started:</span> 
+        <span style="font-size: 0.9rem; color: #94A3B8;">
+            If you are on mobile, tap the arrow ( <b style="color: #6366F1;">&gt;</b> ) in the top-left corner to open the sidebar and upload your reference PDF documents first!
+        </span>
+    </div>
+""", unsafe_allow_html=True)
 # Three-column visual overview
 col_step1, col_step2, col_step3 = st.columns(3)
 
