@@ -8,3 +8,4 @@ chromadb
 pypdf
 python-multipart
 python-dotenv
+langchain-google-genai
