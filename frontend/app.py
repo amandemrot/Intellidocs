@@ -167,7 +167,8 @@ st.markdown("""
 st.sidebar.markdown("### 📥 Document Upload")
 uploaded_file = st.sidebar.file_uploader("Upload PDF files to build vector space", type=["pdf"], label_visibility="collapsed")
 
-BACKEND_URL = "http://127.0.0.1:8000"
+import os
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
 if uploaded_file is not None:
     if st.sidebar.button("Process Document", use_container_width=True):
