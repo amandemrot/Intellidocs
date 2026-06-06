@@ -1,0 +1,13 @@
+# Python virtual environment
+venv/
+.env
+
+# Local database and uploaded files
+backend/document_store/
+temp_uploads/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
