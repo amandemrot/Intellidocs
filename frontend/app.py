@@ -160,6 +160,32 @@ st.markdown("""
         font-size: 0.75rem;
         color: #64748B;
     }
+/* Style the native sidebar arrow to include a clear "Upload" label on mobile */
+    button[data-testid="stSidebarCollapseButton"] {
+        display: inline-flex !important;
+        align-items: center !important;
+        width: auto !important;
+        padding-right: 12px !important;
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 8px !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    button[data-testid="stSidebarCollapseButton"]:hover {
+        background: rgba(168, 85, 247, 0.1) !important;
+        border-color: rgba(168, 85, 247, 0.3) !important;
+    }
+    
+    button[data-testid="stSidebarCollapseButton"]::after {
+        content: " Upload 📁" !important;
+        font-family: 'Plus Jakarta Sans', sans-serif !important;
+        font-size: 0.85rem !important;
+        font-weight: 600 !important;
+        color: #A855F7 !important; /* Premium purple matching theme */
+        margin-left: 6px !important;
+        white-space: nowrap !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
