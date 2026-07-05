@@ -3,7 +3,7 @@
 IntelliDocs is a cognitive Retrieval-Augmented Generation (RAG) system designed to perform intelligent document analysis. It allows users to upload unstructured PDF documents and interrogate them using Google's Gemini models for context-grounded, cited answers.
 
 ## 🚀 Live Demo
-[Access IntelliDocs App](https://intellidocs-kzprstjnrsevlyfmwjzo9.streamlit.app/)
+[Access IntelliDocs App](https://intellidocs-kzprstjnrsevylyfmwjzo9.streamlit.app/)
 
 > **Note:** This app is hosted on a free-tier cloud service. If the server is inactive, the backend may take ~60 seconds to "wake up" upon the initial request. Thank you for your patience!
 
