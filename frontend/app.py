@@ -285,12 +285,12 @@ st.markdown("<br>", unsafe_allow_html=True)
 # Question Ingestion Section
 with st.container(border=True):
     st.write("### 💬 Interrogate Knowledge Base")
-    st.caption("A sample document is pre-loaded — try one of these:")
+    st.caption("A sample document is pre-loaded — upload your own PDF anytime. Try a question:")
     q_cols = st.columns(3)
     SUGGESTED = [
         "Summarize this document in 3 bullet points",
-        "What projects are mentioned?",
-        "What technical skills are listed?",
+        "What are the key topics covered in this document?",
+        "List the most important facts from this document",
     ]
     for i, q in enumerate(SUGGESTED):
         if q_cols[i].button(q, key=f"suggest{i}"):
