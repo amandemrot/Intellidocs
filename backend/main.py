@@ -42,6 +42,37 @@ except Exception as e:
     print(f"Embedding initialization error: {e}. Ensure GOOGLE_API_KEY is set.")
     embeddings = None
     vector_store = None
+llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0)
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "sample_docs", "sample.pdf")
+
+@app.on_event("startup")
+def preload_sample():
+    """Rebuild the demo knowledge base after every restart (Render disk is ephemeral)."""
+    global vector_store
+    try:
+        if vector_store is None or embeddings is None:
+            return
+        existing = vector_store._collection.count()
+        if existing > 0:
+            print(f"--- STARTUP --- Vector store already has {existing} chunks, skipping preload.")
+            return
+        if not os.path.exists(SAMPLE_PATH):
+            print("--- STARTUP --- No sample.pdf found, skipping preload.")
+            return
+        loader = PyPDFLoader(SAMPLE_PATH)
+        documents = loader.load()
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(documents)
+        vector_store.add_documents(chunks)
+        vector_store.persist()
+        print(f"--- STARTUP --- Preloaded sample.pdf into {len(chunks)} chunks.")
+    except Exception as e:
+        print(f"--- STARTUP --- Preload failed: {e}")
 
 class QueryRequest(BaseModel):
     question: str
@@ -129,9 +160,6 @@ async def query_documents(request: QueryRequest):
         retriever = vector_store.as_retriever(search_kwargs={"k": 3})
         docs = retriever.invoke(request.question)
         print(f"--- DIAGNOSTIC --- Successfully retrieved {len(docs)} chunks from Chroma.")
-
-        # 2. Define the Gemini LLM
-        llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0)
 
         # 3. Format the text context for the prompt
         formatted_context = "\n\n".join(doc.page_content for doc in docs)
