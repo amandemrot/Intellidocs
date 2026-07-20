@@ -285,9 +285,20 @@ st.markdown("<br>", unsafe_allow_html=True)
 # Question Ingestion Section
 with st.container(border=True):
     st.write("### 💬 Interrogate Knowledge Base")
+    st.caption("A sample document is pre-loaded — try one of these:")
+    q_cols = st.columns(3)
+    SUGGESTED = [
+        "Summarize this document in 3 bullet points",
+        "What projects are mentioned?",
+        "What technical skills are listed?",
+    ]
+    for i, q in enumerate(SUGGESTED):
+        if q_cols[i].button(q, key=f"suggest{i}"):
+            st.session_state["prefill_q"] = q
     user_question = st.text_input(
         "Ask a question based on uploaded context:", 
-        placeholder="e.g., Which college or university is mentioned in this resume template?...",
+        value=st.session_state.get("prefill_q", ""),
+        placeholder="e.g., What projects are mentioned in this document?...",
         label_visibility="collapsed"
     )
     submit_button = st.button("Generate Answer", use_container_width=True)
