@@ -42,6 +42,7 @@ except Exception as e:
     print(f"Embedding initialization error: {e}. Ensure GOOGLE_API_KEY is set.")
     embeddings = None
     vector_store = None
+
 llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0)
 
 @app.get("/health")
@@ -49,6 +50,16 @@ def health():
     return {"ok": True}
 
 SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "sample_docs", "sample.pdf")
+
+def clear_vector_store():
+    """Delete all chunks so only one document lives in the store at a time."""
+    try:
+        existing = vector_store._collection.get()
+        if existing and existing.get("ids"):
+            vector_store._collection.delete(ids=existing["ids"])
+            print(f"--- DIAGNOSTIC --- Cleared {len(existing['ids'])} old chunks.")
+    except Exception as ce:
+        print(f"--- DIAGNOSTIC --- Clear failed: {ce}")
 
 @app.on_event("startup")
 def preload_sample():
@@ -80,8 +91,8 @@ class QueryRequest(BaseModel):
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
     """
-    Receives a PDF, saves it temporarily, parses it, chunks it,
-    generates embeddings, and stores them in the local Chroma DB.
+    Receives a PDF, wipes the previous knowledge base, parses and chunks
+    the new PDF, and stores it as the ONLY document in the Chroma DB.
     """
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are currently supported.")
@@ -123,15 +134,16 @@ async def upload_document(file: UploadFile = File(...)):
                 )
             )
 
-        # 3. Embedding Generation & Vector DB Storage
+        # 3. Wipe previous documents, then store ONLY this one
         global vector_store
         if vector_store is None:
             vector_store = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
         
+        clear_vector_store()
         vector_store.add_documents(chunks)
         vector_store.persist()
 
-        return {"message": f"Successfully processed '{file.filename}' into {len(chunks)} chunks."}
+        return {"message": f"Successfully processed '{file.filename}' into {len(chunks)} chunks. Answers will now come only from this document."}
 
     except HTTPException as he:
         # Re-raise HTTP exceptions so FastAPI handles them properly
@@ -143,6 +155,7 @@ async def upload_document(file: UploadFile = File(...)):
         # Clean up temporary file
         if os.path.exists(file_path):
             os.remove(file_path)
+
 @app.post("/query")
 async def query_documents(request: QueryRequest):
     """
@@ -161,7 +174,7 @@ async def query_documents(request: QueryRequest):
         docs = retriever.invoke(request.question)
         print(f"--- DIAGNOSTIC --- Successfully retrieved {len(docs)} chunks from Chroma.")
 
-        # 3. Format the text context for the prompt
+        # 2. Format the text context for the prompt
         formatted_context = "\n\n".join(doc.page_content for doc in docs)
         
         system_prompt = (
@@ -175,7 +188,7 @@ async def query_documents(request: QueryRequest):
             ("human", "{input}"),
         ])
 
-        # 4. Generate the prompt and invoke Gemini
+        # 3. Generate the prompt and invoke Gemini
         formatted_prompt = prompt.invoke({"context": formatted_context, "input": request.question})
         print("--- DIAGNOSTIC --- Sending prompt to Gemini...")
         response = llm.invoke(formatted_prompt)
@@ -203,7 +216,7 @@ async def query_documents(request: QueryRequest):
             except Exception:
                 pass  # Fallback to raw string if parsing fails
 
-        # 5. Extract citations (sources) from the retrieved documents
+        # 4. Extract citations (sources) from the retrieved documents
         citations = []
         for doc in docs:
             page = doc.metadata.get("page", 0) + 1
