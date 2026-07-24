@@ -120,29 +120,25 @@ st.markdown("""
         cursor: pointer !important;
         user-select: none !important;
         
-        /* Smooth, modern cubic-bezier curve for high-end feel */
         transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), 
                     box-shadow 0.4s cubic-bezier(0.16, 1, 0.3, 1), 
                     border-color 0.4s cubic-bezier(0.16, 1, 0.3, 1), 
                     background-color 0.4s ease !important;
     }
     
-    /* Elegant Hover Zoom, Elevation and Violet Glow */
     .step-card:hover {
         transform: scale(1.05) translateY(-5px) !important;
         background-color: rgba(255, 255, 255, 0.03) !important;
         border-color: rgba(168, 85, 247, 0.3) !important;
         
-        /* Two-layer glowing shadow */
         box-shadow: 0 15px 35px rgba(168, 85, 247, 0.12), 
                     0 5px 15px rgba(0, 0, 0, 0.2) !important;
     }
     
-    /* Satisfying tactile press feedback when clicked */
     .step-card:active {
         transform: scale(0.97) translateY(-1px) !important;
         border-color: rgba(99, 102, 241, 0.5) !important;
-        transition: transform 0.08s ease !important; /* Fast response on release */
+        transition: transform 0.08s ease !important;
     }
     
     .step-icon {
@@ -160,7 +156,8 @@ st.markdown("""
         font-size: 0.75rem;
         color: #64748B;
     }
-/* Style the native sidebar arrow to include a clear "Upload" label on mobile */
+
+    /* Style the native sidebar arrow to include a clear "Upload" label on mobile */
     button[data-testid="stSidebarCollapseButton"] {
         display: inline-flex !important;
         align-items: center !important;
@@ -182,7 +179,7 @@ st.markdown("""
         font-family: 'Plus Jakarta Sans', sans-serif !important;
         font-size: 0.85rem !important;
         font-weight: 600 !important;
-        color: #A855F7 !important; /* Premium purple matching theme */
+        color: #A855F7 !important;
         margin-left: 6px !important;
         white-space: nowrap !important;
     }
@@ -191,23 +188,44 @@ st.markdown("""
 
 # ----------------- SIDEBAR -----------------
 st.sidebar.markdown("### 📥 Document Upload")
-uploaded_file = st.sidebar.file_uploader("Upload PDF files to build vector space", type=["pdf"], label_visibility="collapsed")
+uploaded_files = st.sidebar.file_uploader(
+    "Upload PDF files to build vector space",
+    type=["pdf"],
+    accept_multiple_files=True,
+    label_visibility="collapsed"
+)
 
 import os
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
-if uploaded_file is not None:
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_documents(cache_key=0):
+    """Cached so we don't hit the backend on every Streamlit rerun."""
+    try:
+        r = requests.get(f"{BACKEND_URL}/documents", timeout=10)
+        if r.status_code == 200:
+            return r.json().get("documents", [])
+    except Exception:
+        pass
+    return []
+
+
+if uploaded_files:
     if st.sidebar.button("Process Document", use_container_width=True):
-        with st.sidebar.spinner("Parsing text and calculating embeddings..."):
-            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-            try:
-                response = requests.post(f"{BACKEND_URL}/upload", files=files)
-                if response.status_code == 200:
-                    st.sidebar.success(response.json().get("message", "Success!"))
-                else:
-                    st.sidebar.error(f"Error: {response.json().get('detail')}")
-            except Exception as e:
-                st.sidebar.error(f"Backend offline: {e}")
+        for uf in uploaded_files:
+            with st.sidebar.spinner(f"Processing {uf.name}..."):
+                files = {"file": (uf.name, uf.getvalue(), "application/pdf")}
+                try:
+                    response = requests.post(f"{BACKEND_URL}/upload", files=files)
+                    if response.status_code == 200:
+                        st.sidebar.success(response.json().get("message", "Success!"))
+                        st.session_state["active_doc"] = response.json().get("doc_name")
+                        st.session_state["doc_cache_key"] = st.session_state.get("doc_cache_key", 0) + 1
+                    else:
+                        st.sidebar.error(f"{uf.name}: {response.json().get('detail')}")
+                except Exception as e:
+                    st.sidebar.error(f"Backend offline: {e}")
 
 # Sidebar Engine Status Metrics
 st.sidebar.markdown("<br><hr style='border: 1px solid rgba(255,255,255,0.05)'>", unsafe_allow_html=True)
@@ -250,6 +268,7 @@ st.markdown("""
         </span>
     </div>
 """, unsafe_allow_html=True)
+
 # Three-column visual overview
 col_step1, col_step2, col_step3 = st.columns(3)
 
@@ -285,16 +304,47 @@ st.markdown("<br>", unsafe_allow_html=True)
 # Question Ingestion Section
 with st.container(border=True):
     st.write("### 💬 Interrogate Knowledge Base")
-    st.caption("A sample document is pre-loaded — upload your own PDF anytime. Try a question:")
+    st.caption("A sample document is pre-loaded — upload your own PDFs anytime.")
+
+    doc_options = fetch_documents(st.session_state.get("doc_cache_key", 0))
+
+    selected_doc = None
+    if doc_options:
+        default_idx = 0
+        active = st.session_state.get("active_doc")
+        if active in doc_options:
+            default_idx = doc_options.index(active)
+
+        pick_col, del_col = st.columns([4, 1])
+        selected_doc = pick_col.selectbox(
+            "Answer using this document:",
+            doc_options,
+            index=default_idx,
+        )
+        del_col.markdown("<br>", unsafe_allow_html=True)
+        if del_col.button("🗑️ Remove", use_container_width=True):
+            try:
+                d = requests.delete(f"{BACKEND_URL}/documents", params={"doc_name": selected_doc}, timeout=30)
+                if d.status_code == 200:
+                    st.session_state["doc_cache_key"] = st.session_state.get("doc_cache_key", 0) + 1
+                    st.session_state.pop("active_doc", None)
+                    st.rerun()
+                else:
+                    st.error(d.json().get("detail", "Delete failed."))
+            except Exception as e:
+                st.error(f"Backend offline: {e}")
+
+    st.caption("Try a question:")
     q_cols = st.columns(3)
     SUGGESTED = [
-        "Summarize this document in 3 bullet points",
-        "What are the key topics covered in this document?",
-        "List the most important facts from this document",
+        ("📄 Summarize", "Summarize this document in 3 bullet points"),
+        ("🔑 Key Topics", "What are the key topics covered in this document?"),
+        ("⭐ Key Facts", "List the most important facts from this document"),
     ]
-    for i, q in enumerate(SUGGESTED):
-        if q_cols[i].button(q, key=f"suggest{i}"):
+    for i, (label, q) in enumerate(SUGGESTED):
+        if q_cols[i].button(label, key=f"suggest{i}", use_container_width=True):
             st.session_state["prefill_q"] = q
+
     user_question = st.text_input(
         "Ask a question based on uploaded context:", 
         value=st.session_state.get("prefill_q", ""),
@@ -308,26 +358,28 @@ if submit_button:
     if not user_question.strip():
         st.warning("Please type a valid question.")
     else:
-        with st.spinner("Retrieving data and generating grounded response..."):
+        payload = {"question": user_question}
+        if selected_doc:
+            payload["doc_name"] = selected_doc
+
+        with st.spinner("Retrieving context and generating answer..."):
             try:
-                response = requests.post(f"{BACKEND_URL}/query", json={"question": user_question})
-                
+                response = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=120)
+
                 if response.status_code == 200:
                     data = response.json()
-                    
-                    # Display Answer Card
+
                     with st.container(border=True):
                         st.markdown("### 🤖 Synthesized Answer")
                         st.write(data["answer"])
-                    
-                    # Display Citation Cards
+
                     if data.get("citations"):
                         st.markdown("<br><h4>📚 Reference Sources</h4>", unsafe_allow_html=True)
                         for idx, citation in enumerate(data["citations"]):
                             with st.expander(f"Factual Fragment {idx+1} — {citation['source']} (Page {citation['page']})"):
                                 st.markdown(f"*{citation['snippet']}*")
                 else:
-                    st.error(f"Failing Backend response: {response.json().get('detail', 'Unknown error')}")
-                    
+                    st.error(f"Backend response: {response.json().get('detail', 'Unknown error')}")
+
             except Exception as e:
                 st.error(f"Error connecting to FastAPI engine: {e}")
