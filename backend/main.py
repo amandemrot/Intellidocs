@@ -1,18 +1,15 @@
 import os
 import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
 
-# LangChain Imports
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-
 from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
@@ -31,15 +28,18 @@ UPLOAD_DIR = "temp_uploads"
 DB_DIR = "backend/document_store"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-try:
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-    vector_store = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-except Exception as e:
-    print(f"Embedding initialization error: {e}. Ensure GOOGLE_API_KEY is set.")
-    embeddings = None
-    vector_store = None
+def get_vector_store():
+    try:
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+        return Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+    except Exception as e:
+        print(f"Embedding initialization error: {e}")
+        return None
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash", temperature=0)
+try:
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+except Exception:
+    llm = None
 
 SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "sample_docs", "sample.pdf")
 MAX_CHUNKS = 60
@@ -51,7 +51,7 @@ def health():
 
 
 def remove_document(doc_name: str):
-    """Delete all chunks belonging to one document (used when re-uploading the same file)."""
+    """Delete all chunks belonging to one document."""
     try:
         existing = vector_store._collection.get(where={"doc_name": doc_name})
         if existing and existing.get("ids"):
@@ -77,7 +77,6 @@ def embed_and_store(chunks, doc_name):
     calls = max(1, (len(texts) + BATCH - 1) // BATCH)
     print(f"--- DIAGNOSTIC --- Embedded {len(texts)} chunks in {calls} batched API call(s).")
 
-    # IDs must be unique per document or chunks from different PDFs overwrite each other
     ids = [f"{doc_name}-chunk-{i}" for i in range(len(texts))]
     vector_store._collection.add(ids=ids, embeddings=all_vectors, documents=texts, metadatas=metadatas)
     vector_store.persist()
@@ -175,7 +174,6 @@ async def upload_document(file: UploadFile = File(...)):
                 )
             )
 
-        # Guard: free-tier Gemini quota is ~100 embedded chunks/day, so cap document size
         if len(chunks) > MAX_CHUNKS:
             raise HTTPException(
                 status_code=400,
@@ -191,7 +189,7 @@ async def upload_document(file: UploadFile = File(...)):
             vector_store = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
 
         doc_name = file.filename
-        remove_document(doc_name)   # re-uploading the same file replaces its old chunks
+        remove_document(doc_name)
         embed_and_store(chunks, doc_name)
 
         return {
@@ -228,17 +226,15 @@ async def query_documents(request: QueryRequest):
         print(f"--- DIAGNOSTIC --- Retrieved {len(docs)} chunks from Chroma.")
 
         if not docs:
-            return {
-                "answer": "I could not find anything relevant in the selected document.",
-                "citations": []
-            }
+            return {"answer": "I could not find anything relevant in the selected document.", "citations": []}
 
         formatted_context = "\n\n".join(doc.page_content for doc in docs)
 
         system_prompt = (
             "You are a helpful assistant. Answer the user's question using only the provided context below.\n"
             "If you do not know the answer or if it's not present in the context, state that you do not know.\n"
-            "Do not make up information.\nBe concise: answer in at most 3-4 sentences, or 3 short bullet points, unless the user explicitly asks for more detail.\n\n"
+            "Do not make up information.\n"
+            "Be concise: answer in at most 3-4 sentences, or 3 short bullet points, unless the user explicitly asks for more detail.\n\n"
             "Context:\n{context}"
         )
         prompt = ChatPromptTemplate.from_messages([
@@ -273,11 +269,10 @@ async def query_documents(request: QueryRequest):
         for doc in docs:
             page = doc.metadata.get("page", 0) + 1
             source = doc.metadata.get("doc_name") or doc.metadata.get("source", "Unknown Document")
-            snippet = doc.page_content[:150] + "..."
             citations.append({
                 "source": os.path.basename(source),
                 "page": page,
-                "snippet": snippet
+                "snippet": doc.page_content[:150] + "..."
             })
 
         return {"answer": answer, "citations": citations}
@@ -285,67 +280,3 @@ async def query_documents(request: QueryRequest):
     except Exception as e:
         print(f"--- DIAGNOSTIC ERROR --- Query failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
-@app.post("/query_stream")
-async def query_stream(request: QueryRequest):
-    """Same as /query but streams the answer token-by-token, then sends citations."""
-    import json
-
-    global vector_store
-    if vector_store is None:
-        raise HTTPException(status_code=500, detail="Vector store not initialized.")
-
-    search_kwargs = {"k": 3}
-    if request.doc_name:
-        search_kwargs["filter"] = {"doc_name": request.doc_name}
-
-    retriever = vector_store.as_retriever(search_kwargs=search_kwargs)
-    docs = retriever.invoke(request.question)
-    print(f"--- DIAGNOSTIC --- [stream] Retrieved {len(docs)} chunks | doc: {request.doc_name}")
-
-    citations = []
-    for doc in docs:
-        page = doc.metadata.get("page", 0) + 1
-        source = doc.metadata.get("doc_name") or doc.metadata.get("source", "Unknown Document")
-        citations.append({
-            "source": os.path.basename(source),
-            "page": page,
-            "snippet": doc.page_content[:150] + "..."
-        })
-
-    formatted_context = "\n\n".join(doc.page_content for doc in docs)
-
-    system_prompt = (
-        "You are a helpful assistant. Answer the user's question using only the provided context below.\n"
-        "If you do not know the answer or if it's not present in the context, state that you do not know.\n"
-        "Do not make up information.\n\n"
-        "Context:\n{context}"
-    )
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
-    formatted_prompt = prompt.invoke({"context": formatted_context, "input": request.question})
-
-    def generate():
-        if not docs:
-            yield "I could not find anything relevant in the selected document."
-        else:
-            try:
-                for chunk in llm.stream(formatted_prompt):
-                    piece = chunk.content
-                    if isinstance(piece, list):
-                        piece = "".join(
-                            p.get("text", "") for p in piece if isinstance(p, dict)
-                        )
-                    if piece:
-                        yield piece
-            except Exception as e:
-                yield f"\n\n[Generation error: {e}]"
-        # Citations can't stream alongside text, so send them last behind a marker
-        yield "<<<CITATIONS>>>" + json.dumps(citations)
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
