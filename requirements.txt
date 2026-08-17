@@ -1,11 +1,9 @@
 fastapi
 uvicorn
-streamlit
 langchain
 langchain-community
-langchain-openai
+langchain-google-genai
 chromadb
 pypdf
 python-multipart
 python-dotenv
-langchain-google-genai
