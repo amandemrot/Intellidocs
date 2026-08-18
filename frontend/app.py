@@ -1,5 +1,136 @@
-import streamlit as st
+import os
+import shutil
+import tempfile
 import requests
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Load Google API Key from environment or Streamlit Secrets
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY and hasattr(st, "secrets") and "GOOGLE_API_KEY" in st.secrets:
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+
+# Native RAG Engine Initializer (In-App Fallback)
+@st.cache_resource
+def init_native_rag():
+    try:
+        from langchain_community.vectorstores import Chroma
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+        
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+        db_dir = os.path.join(tempfile.gettempdir(), "intellidocs_chroma")
+        os.makedirs(db_dir, exist_ok=True)
+        vector_store = Chroma(persist_directory=db_dir, embedding_function=embeddings)
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+        return vector_store, embeddings, llm
+    except Exception as e:
+        print(f"Native RAG init exception: {e}")
+        return None, None, None
+
+def native_list_documents():
+    vstore, _, _ = init_native_rag()
+    if not vstore:
+        return []
+    try:
+        data = vstore._collection.get(include=["metadatas"])
+        names = []
+        for m in (data.get("metadatas") or []):
+            n = (m or {}).get("doc_name")
+            if n and n not in names:
+                names.append(n)
+        return sorted(names)
+    except Exception:
+        return []
+
+def native_process_pdf(file_bytes, filename):
+    from langchain_community.document_loaders import PyPDFLoader
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import Chroma
+    
+    vstore, embeddings, _ = init_native_rag()
+    if not vstore:
+        raise Exception("Google API Key missing or RAG engine not initialized.")
+    
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, filename)
+    with open(file_path, "wb") as f:
+        f.write(file_bytes)
+        
+    try:
+        loader = PyPDFLoader(file_path)
+        docs = loader.load()
+        if not docs:
+            raise Exception("No text found in PDF.")
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(docs)
+        
+        existing = vstore._collection.get(where={"doc_name": filename})
+        if existing and existing.get("ids"):
+            vstore._collection.delete(ids=existing["ids"])
+            
+        texts = [c.page_content for c in chunks]
+        metadatas = []
+        for c in chunks:
+            m = dict(c.metadata)
+            m["doc_name"] = filename
+            metadatas.append(m)
+            
+        ids = [f"{filename}-chunk-{i}" for i in range(len(texts))]
+        vstore._collection.add(ids=ids, documents=texts, metadatas=metadatas)
+        return f"Successfully processed '{filename}' into {len(chunks)} chunks."
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+def native_delete_document(filename):
+    vstore, _, _ = init_native_rag()
+    if not vstore:
+        return
+    existing = vstore._collection.get(where={"doc_name": filename})
+    if existing and existing.get("ids"):
+        vstore._collection.delete(ids=existing["ids"])
+
+def native_query_documents(question, doc_name=None):
+    from langchain_core.prompts import ChatPromptTemplate
+    
+    vstore, _, llm = init_native_rag()
+    if not vstore or not llm:
+        raise Exception("AI Engine not initialized. Ensure GOOGLE_API_KEY is configured.")
+        
+    search_kwargs = {"k": 3}
+    if doc_name:
+        search_kwargs["filter"] = {"doc_name": doc_name}
+        
+    retriever = vstore.as_retriever(search_kwargs=search_kwargs)
+    docs = retriever.invoke(question)
+    if not docs:
+        return {"answer": "I could not find anything relevant in the selected document.", "citations": []}
+        
+    formatted_context = "\n\n".join(doc.page_content for doc in docs)
+    system_prompt = (
+        "You are a helpful assistant. Answer the user's question using only the provided context below.\n"
+        "If you do not know the answer or if it's not present in the context, state that you do not know.\n"
+        "Context:\n{context}"
+    )
+    prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{input}")])
+    formatted_prompt = prompt.invoke({"context": formatted_context, "input": question})
+    response = llm.invoke(formatted_prompt)
+    
+    citations = []
+    for doc in docs:
+        page = doc.metadata.get("page", 0) + 1
+        source = doc.metadata.get("doc_name") or doc.metadata.get("source", "Unknown Document")
+        citations.append({
+            "source": os.path.basename(source),
+            "page": page,
+            "snippet": doc.page_content[:150] + "..."
+        })
+    return {"answer": response.content, "citations": citations}
 
 # Set page config
 st.set_page_config(page_title="IntelliDocs AI Assistant", layout="wide")
@@ -56,132 +187,47 @@ st.markdown("""
         margin-bottom: 1rem !important;
     }
     
-    /* Style inputs */
-    div[data-baseweb="input"] {
-        background-color: rgba(255, 255, 255, 0.01) !important;
-        border: 1px solid rgba(255, 255, 255, 0.08) !important;
-        border-radius: 10px !important;
-        color: #FFFFFF !important;
-        transition: all 0.3s ease;
-    }
-    
-    div[data-baseweb="input"]:focus-within {
-        border-color: #6366F1 !important;
-        box-shadow: 0 0 10px rgba(99, 102, 241, 0.15) !important;
-    }
-    
-    /* Cinematic primary button style */
-    .stButton>button {
-        background: linear-gradient(135deg, #6366F1 0%, #4F46E5 100%) !important;
-        color: white !important;
-        border: none !important;
-        padding: 0.6rem 1.8rem !important;
-        border-radius: 10px !important;
-        font-weight: 600 !important;
-        transition: all 0.3s ease !important;
-        box-shadow: 0 4px 15px rgba(99, 102, 241, 0.2) !important;
-    }
-    
-    .stButton>button:hover {
-        transform: translateY(-1px) !important;
-        box-shadow: 0 6px 18px rgba(99, 102, 241, 0.4) !important;
-        background: linear-gradient(135deg, #818CF8 0%, #6366F1 100%) !important;
-    }
-    
-    /* Sidebar info metric cards */
     .metric-card {
-        background: rgba(255, 255, 255, 0.02);
+        background: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 8px;
-        padding: 0.8rem;
-        margin-bottom: 0.6rem;
+        border-radius: 12px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.5rem;
     }
-    
     .metric-label {
         font-size: 0.75rem;
-        color: #64748B;
+        color: #94A3B8;
+        font-weight: 500;
         text-transform: uppercase;
-        letter-spacing: 1px;
+        letter-spacing: 0.5px;
     }
-    
     .metric-value {
         font-size: 0.9rem;
-        font-weight: 600;
-        color: #F1F5F9;
-    }
-    
-    /* Step pipeline layout with cinematic zoom & press feedback */
-    .step-card {
-        text-align: center;
-        background: rgba(255, 255, 255, 0.01) !important;
-        border: 1px solid rgba(255, 255, 255, 0.03) !important;
-        border-radius: 12px !important;
-        padding: 1.2rem !important;
-        cursor: pointer !important;
-        user-select: none !important;
-        
-        transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), 
-                    box-shadow 0.4s cubic-bezier(0.16, 1, 0.3, 1), 
-                    border-color 0.4s cubic-bezier(0.16, 1, 0.3, 1), 
-                    background-color 0.4s ease !important;
-    }
-    
-    .step-card:hover {
-        transform: scale(1.05) translateY(-5px) !important;
-        background-color: rgba(255, 255, 255, 0.03) !important;
-        border-color: rgba(168, 85, 247, 0.3) !important;
-        
-        box-shadow: 0 15px 35px rgba(168, 85, 247, 0.12), 
-                    0 5px 15px rgba(0, 0, 0, 0.2) !important;
-    }
-    
-    .step-card:active {
-        transform: scale(0.97) translateY(-1px) !important;
-        border-color: rgba(99, 102, 241, 0.5) !important;
-        transition: transform 0.08s ease !important;
-    }
-    
-    .step-icon {
-        font-size: 1.5rem;
-        margin-bottom: 0.3rem;
-    }
-    
-    .step-title {
-        font-weight: 600;
         color: #A855F7;
-        font-size: 0.9rem;
+        font-weight: 700;
     }
-    
+    .step-card {
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 16px;
+        padding: 1.5rem;
+        text-align: center;
+        height: 100%;
+    }
+    .step-icon {
+        font-size: 2.2rem;
+        margin-bottom: 0.75rem;
+    }
+    .step-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #F8FAFC;
+        margin-bottom: 0.5rem;
+    }
     .step-desc {
-        font-size: 0.75rem;
-        color: #64748B;
-    }
-
-    /* Style the native sidebar arrow to include a clear "Upload" label on mobile */
-    button[data-testid="stSidebarCollapseButton"] {
-        display: inline-flex !important;
-        align-items: center !important;
-        width: auto !important;
-        padding-right: 12px !important;
-        background: rgba(255, 255, 255, 0.04) !important;
-        border: 1px solid rgba(255, 255, 255, 0.08) !important;
-        border-radius: 8px !important;
-        transition: all 0.3s ease !important;
-    }
-    
-    button[data-testid="stSidebarCollapseButton"]:hover {
-        background: rgba(168, 85, 247, 0.1) !important;
-        border-color: rgba(168, 85, 247, 0.3) !important;
-    }
-    
-    button[data-testid="stSidebarCollapseButton"]::after {
-        content: " Upload 📁" !important;
-        font-family: 'Plus Jakarta Sans', sans-serif !important;
-        font-size: 0.85rem !important;
-        font-weight: 600 !important;
-        color: #A855F7 !important;
-        margin-left: 6px !important;
-        white-space: nowrap !important;
+        font-size: 0.85rem;
+        color: #94A3B8;
+        line-height: 1.5;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -195,47 +241,50 @@ uploaded_files = st.sidebar.file_uploader(
     label_visibility="collapsed"
 )
 
-import os
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
-
-
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def fetch_documents(cache_key=0):
-    """Cached so we don't hit the backend on every Streamlit rerun."""
     try:
-        r = requests.get(f"{BACKEND_URL}/documents", timeout=10)
+        r = requests.get(f"{BACKEND_URL}/documents", timeout=3)
         if r.status_code == 200:
             return r.json().get("documents", [])
     except Exception:
         pass
-    return []
-
+    return native_list_documents()
 
 if uploaded_files:
     if st.sidebar.button("Process Document", use_container_width=True):
         for uf in uploaded_files:
             with st.sidebar.spinner(f"Processing {uf.name}..."):
-                files = {"file": (uf.name, uf.getvalue(), "application/pdf")}
+                processed = False
                 try:
-                    response = requests.post(f"{BACKEND_URL}/upload", files=files)
+                    files = {"file": (uf.name, uf.getvalue(), "application/pdf")}
+                    response = requests.post(f"{BACKEND_URL}/upload", files=files, timeout=5)
                     if response.status_code == 200:
                         st.sidebar.success(response.json().get("message", "Success!"))
                         st.session_state["active_doc"] = response.json().get("doc_name")
-                        st.session_state["doc_cache_key"] = st.session_state.get("doc_cache_key", 0) + 1
-                    else:
-                        st.sidebar.error(f"{uf.name}: {response.json().get('detail')}")
-                except Exception as e:
-                    st.sidebar.error(f"Backend offline: {e}")
+                        processed = True
+                except Exception:
+                    pass
+                
+                if not processed:
+                    try:
+                        msg = native_process_pdf(uf.getvalue(), uf.name)
+                        st.sidebar.success(msg)
+                        st.session_state["active_doc"] = uf.name
+                    except Exception as ne:
+                        st.sidebar.error(f"{uf.name}: {ne}")
+                        
+                st.session_state["doc_cache_key"] = st.session_state.get("doc_cache_key", 0) + 1
 
 # Sidebar Engine Status Metrics
 st.sidebar.markdown("<br><hr style='border: 1px solid rgba(255,255,255,0.05)'>", unsafe_allow_html=True)
 st.sidebar.markdown("### ⚙️ System Parameters")
 
 metrics = [
-    ("LLM Generation Engine", "Gemini 3.5 Flash"),
+    ("LLM Generation Engine", "Gemini 1.5 Flash"),
     ("Vector Dimension Models", "gemini-embedding-001"),
-    ("Vector Database Engine", "ChromaDB (Local Store)"),
-    ("API Framework Core", "FastAPI (Python)")
+    ("Vector Database Engine", "ChromaDB (Self-Contained)"),
+    ("Framework Core", "Streamlit + LangChain")
 ]
 
 for label, val in metrics:
@@ -251,7 +300,7 @@ for label, val in metrics:
 st.markdown('<h1 class="hero-title">INTELLIDOCS</h1>', unsafe_allow_html=True)
 st.markdown('<p class="hero-subtitle">Cognitive Retrieval-Augmented Generation (RAG) System</p>', unsafe_allow_html=True)
 
-# Mobile-friendly instructional banner to guide users to the sidebar
+# Mobile-friendly instructional banner
 st.markdown("""
     <div style="
         background: rgba(99, 102, 241, 0.08); 
@@ -304,7 +353,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 # Question Ingestion Section
 with st.container(border=True):
     st.write("### 💬 Interrogate Knowledge Base")
-    st.caption("A sample document is pre-loaded — upload your own PDFs anytime.")
+    st.caption("Upload your PDF documents in the sidebar to build your vector space.")
 
     doc_options = fetch_documents(st.session_state.get("doc_cache_key", 0))
 
@@ -324,15 +373,13 @@ with st.container(border=True):
         del_col.markdown("<br>", unsafe_allow_html=True)
         if del_col.button("🗑️ Remove", use_container_width=True):
             try:
-                d = requests.delete(f"{BACKEND_URL}/documents", params={"doc_name": selected_doc}, timeout=30)
-                if d.status_code == 200:
-                    st.session_state["doc_cache_key"] = st.session_state.get("doc_cache_key", 0) + 1
-                    st.session_state.pop("active_doc", None)
-                    st.rerun()
-                else:
-                    st.error(d.json().get("detail", "Delete failed."))
-            except Exception as e:
-                st.error(f"Backend offline: {e}")
+                requests.delete(f"{BACKEND_URL}/documents", params={"doc_name": selected_doc}, timeout=3)
+            except Exception:
+                pass
+            native_delete_document(selected_doc)
+            st.session_state["doc_cache_key"] = st.session_state.get("doc_cache_key", 0) + 1
+            st.session_state.pop("active_doc", None)
+            st.rerun()
 
     st.caption("Try a question:")
     q_cols = st.columns(3)
@@ -348,7 +395,7 @@ with st.container(border=True):
     user_question = st.text_input(
         "Ask a question based on uploaded context:", 
         value=st.session_state.get("prefill_q", ""),
-        placeholder="e.g., What projects are mentioned in this document?...",
+        placeholder="e.g., What key findings are mentioned in this document?...",
         label_visibility="collapsed"
     )
     submit_button = st.button("Generate Answer", use_container_width=True)
@@ -363,23 +410,27 @@ if submit_button:
             payload["doc_name"] = selected_doc
 
         with st.spinner("Retrieving context and generating answer..."):
+            data = None
             try:
-                response = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=120)
+                r = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+            except Exception:
+                pass
+                
+            if not data:
+                try:
+                    data = native_query_documents(user_question, selected_doc)
+                except Exception as qe:
+                    st.error(f"Error: {qe}")
+                    
+            if data:
+                with st.container(border=True):
+                    st.markdown("### 🤖 Synthesized Answer")
+                    st.write(data.get("answer", ""))
 
-                if response.status_code == 200:
-                    data = response.json()
-
-                    with st.container(border=True):
-                        st.markdown("### 🤖 Synthesized Answer")
-                        st.write(data["answer"])
-
-                    if data.get("citations"):
-                        st.markdown("<br><h4>📚 Reference Sources</h4>", unsafe_allow_html=True)
-                        for idx, citation in enumerate(data["citations"]):
-                            with st.expander(f"Factual Fragment {idx+1} — {citation['source']} (Page {citation['page']})"):
-                                st.markdown(f"*{citation['snippet']}*")
-                else:
-                    st.error(f"Backend response: {response.json().get('detail', 'Unknown error')}")
-
-            except Exception as e:
-                st.error(f"Error connecting to FastAPI engine: {e}")
+                if data.get("citations"):
+                    st.markdown("<br><h4>📚 Reference Sources</h4>", unsafe_allow_html=True)
+                    for idx, citation in enumerate(data["citations"]):
+                        with st.expander(f"Factual Fragment {idx+1} — {citation['source']} (Page {citation['page']})"):
+                            st.markdown(f"*{citation['snippet']}*")
