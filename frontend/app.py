@@ -142,6 +142,26 @@ def native_delete_document(filename):
     if vstore:
         vstore.delete_doc(filename)
 
+def clean_answer_text(raw_content):
+    if not raw_content:
+        return ""
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        parts = []
+        for item in raw_content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            elif hasattr(item, "text"):
+                parts.append(str(item.text))
+        if parts:
+            return "\n\n".join(parts)
+    elif isinstance(raw_content, dict) and "text" in raw_content:
+        return str(raw_content["text"])
+    return str(raw_content)
+
 def native_query_documents(question, doc_name=None):
     from langchain_core.prompts import ChatPromptTemplate
     
@@ -163,15 +183,7 @@ def native_query_documents(question, doc_name=None):
     formatted_prompt = prompt.invoke({"context": formatted_context, "input": question})
     response = llm.invoke(formatted_prompt)
     
-    raw_content = response.content
-    answer = raw_content
-    if isinstance(raw_content, list) and len(raw_content) > 0:
-        if isinstance(raw_content[0], dict) and "text" in raw_content[0]:
-            answer = raw_content[0]["text"]
-        elif hasattr(raw_content[0], "text"):
-            answer = raw_content[0].text
-    elif isinstance(raw_content, dict) and "text" in raw_content:
-        answer = raw_content["text"]
+    answer = clean_answer_text(response.content)
     
     citations = []
     for doc in docs:
@@ -182,7 +194,7 @@ def native_query_documents(question, doc_name=None):
             "page": page,
             "snippet": doc.page_content[:150] + "..."
         })
-    return {"answer": response.content, "citations": citations}
+    return {"answer": answer, "citations": citations}
 
 # Set page config
 st.set_page_config(page_title="IntelliDocs AI Assistant", layout="wide")
@@ -479,7 +491,7 @@ if submit_button:
             if data:
                 with st.container(border=True):
                     st.markdown("### 🤖 Synthesized Answer")
-                    st.write(data.get("answer", ""))
+                    st.markdown(clean_answer_text(data.get("answer", "")))
 
                 if data.get("citations"):
                     st.markdown("<br><h4>📚 Reference Sources</h4>", unsafe_allow_html=True)
