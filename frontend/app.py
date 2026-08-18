@@ -399,7 +399,7 @@ with col_step2:
         <div class="step-card">
             <div class="step-icon">🔍</div>
             <div class="step-title">2. Semantic Search</div>
-            <div class="step-desc">Cosine similarity algorithm queries ChromaDB to retrieve relevant factual text context.</div>
+            <div class="step-desc">Cosine similarity algorithm queries vector space to retrieve relevant factual text context.</div>
         </div>
     """, unsafe_allow_html=True)
 
