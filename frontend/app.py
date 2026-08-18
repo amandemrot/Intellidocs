@@ -99,7 +99,7 @@ def init_native_rag():
         
         embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=key)
         vstore = SimpleVectorStore(embeddings)
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=key)
+        llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0, google_api_key=key)
         return vstore, embeddings, llm, None
     except Exception as e:
         return None, None, None, str(e)
@@ -162,6 +162,16 @@ def native_query_documents(question, doc_name=None):
     prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{input}")])
     formatted_prompt = prompt.invoke({"context": formatted_context, "input": question})
     response = llm.invoke(formatted_prompt)
+    
+    raw_content = response.content
+    answer = raw_content
+    if isinstance(raw_content, list) and len(raw_content) > 0:
+        if isinstance(raw_content[0], dict) and "text" in raw_content[0]:
+            answer = raw_content[0]["text"]
+        elif hasattr(raw_content[0], "text"):
+            answer = raw_content[0].text
+    elif isinstance(raw_content, dict) and "text" in raw_content:
+        answer = raw_content["text"]
     
     citations = []
     for doc in docs:
@@ -323,7 +333,7 @@ st.sidebar.markdown("<br><hr style='border: 1px solid rgba(255,255,255,0.05)'>",
 st.sidebar.markdown("### ⚙️ System Parameters")
 
 metrics = [
-    ("LLM Generation Engine", "Gemini 1.5 Flash"),
+    ("LLM Generation Engine", "Gemini 3.6 Flash"),
     ("Vector Dimension Models", "gemini-embedding-001"),
     ("Vector Database Engine", "Numpy Cosine Similarity"),
     ("Framework Core", "Streamlit + LangChain")
