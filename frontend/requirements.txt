@@ -1,10 +1,8 @@
 streamlit
 requests
-fastapi
-uvicorn
+numpy
 langchain
 langchain-community
 langchain-google-genai
-chromadb
 pypdf
 python-dotenv

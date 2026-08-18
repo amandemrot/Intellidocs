@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+import numpy as np
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -20,22 +21,86 @@ def get_api_key():
         os.environ["GEMINI_API_KEY"] = key
     return key
 
-# Native RAG Engine Initializer (In-App Fallback)
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+
+# Pure Python Cosine Similarity Vector Store (0 C++ / SQLite dependencies)
+class SimpleVectorStore:
+    def __init__(self, embeddings):
+        self.embeddings = embeddings
+        self.documents = []  # list of dicts: {"text": str, "metadata": dict, "embedding": np.array}
+
+    def add_chunks(self, chunks, doc_name):
+        # Delete existing chunks for this doc_name
+        self.delete_doc(doc_name)
+        
+        texts = [c.page_content for c in chunks]
+        metadatas = []
+        for c in chunks:
+            m = dict(c.metadata)
+            m["doc_name"] = doc_name
+            metadatas.append(m)
+            
+        vectors = self.embeddings.embed_documents(texts)
+        for text, meta, vec in zip(texts, metadatas, vectors):
+            self.documents.append({
+                "text": text,
+                "metadata": meta,
+                "embedding": np.array(vec, dtype=np.float32)
+            })
+
+    def search(self, query, doc_name=None, k=3):
+        if not self.documents:
+            return []
+        
+        candidates = self.documents
+        if doc_name:
+            candidates = [d for d in self.documents if d["metadata"].get("doc_name") == doc_name]
+            
+        if not candidates:
+            return []
+            
+        query_vec = np.array(self.embeddings.embed_query(query), dtype=np.float32)
+        scores = []
+        for d in candidates:
+            dot = np.dot(query_vec, d["embedding"])
+            norm = np.linalg.norm(query_vec) * np.linalg.norm(d["embedding"])
+            sim = dot / (norm + 1e-8)
+            scores.append((sim, d))
+            
+        scores.sort(key=lambda x: x[0], reverse=True)
+        top_k = scores[:k]
+        
+        class MatchDoc:
+            def __init__(self, text, metadata):
+                self.page_content = text
+                self.metadata = metadata
+                
+        return [MatchDoc(d["text"], d["metadata"]) for sim, d in top_k]
+
+    def list_docs(self):
+        names = []
+        for d in self.documents:
+            n = d["metadata"].get("doc_name")
+            if n and n not in names:
+                names.append(n)
+        return sorted(names)
+
+    def delete_doc(self, doc_name):
+        self.documents = [d for d in self.documents if d["metadata"].get("doc_name") != doc_name]
+
+# Native RAG Engine Initializer
 @st.cache_resource
 def init_native_rag():
     key = get_api_key()
     if not key:
-        return None, None, None, "GOOGLE_API_KEY missing from environment and Streamlit Secrets."
+        return None, None, None, "GOOGLE_API_KEY missing from Streamlit Secrets. Please set GOOGLE_API_KEY in Secrets."
     try:
-        from langchain_community.vectorstores import Chroma
         from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
         
         embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=key)
-        db_dir = os.path.join(tempfile.gettempdir(), "intellidocs_chroma")
-        os.makedirs(db_dir, exist_ok=True)
-        vector_store = Chroma(persist_directory=db_dir, embedding_function=embeddings)
+        vstore = SimpleVectorStore(embeddings)
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=key)
-        return vector_store, embeddings, llm, None
+        return vstore, embeddings, llm, None
     except Exception as e:
         return None, None, None, str(e)
 
@@ -43,21 +108,11 @@ def native_list_documents():
     vstore, _, _, _ = init_native_rag()
     if not vstore:
         return []
-    try:
-        data = vstore._collection.get(include=["metadatas"])
-        names = []
-        for m in (data.get("metadatas") or []):
-            n = (m or {}).get("doc_name")
-            if n and n not in names:
-                names.append(n)
-        return sorted(names)
-    except Exception:
-        return []
+    return vstore.list_docs()
 
 def native_process_pdf(file_bytes, filename):
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_community.vectorstores import Chroma
     
     vstore, embeddings, _, err = init_native_rag()
     if not vstore:
@@ -72,23 +127,11 @@ def native_process_pdf(file_bytes, filename):
         loader = PyPDFLoader(file_path)
         docs = loader.load()
         if not docs:
-            raise Exception("No text found in PDF.")
+            raise Exception("No readable text found in PDF.")
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         chunks = splitter.split_documents(docs)
         
-        existing = vstore._collection.get(where={"doc_name": filename})
-        if existing and existing.get("ids"):
-            vstore._collection.delete(ids=existing["ids"])
-            
-        texts = [c.page_content for c in chunks]
-        metadatas = []
-        for c in chunks:
-            m = dict(c.metadata)
-            m["doc_name"] = filename
-            metadatas.append(m)
-            
-        ids = [f"{filename}-chunk-{i}" for i in range(len(texts))]
-        vstore._collection.add(ids=ids, documents=texts, metadatas=metadatas)
+        vstore.add_chunks(chunks, filename)
         return f"Successfully processed '{filename}' into {len(chunks)} chunks."
     finally:
         if os.path.exists(file_path):
@@ -96,11 +139,8 @@ def native_process_pdf(file_bytes, filename):
 
 def native_delete_document(filename):
     vstore, _, _, _ = init_native_rag()
-    if not vstore:
-        return
-    existing = vstore._collection.get(where={"doc_name": filename})
-    if existing and existing.get("ids"):
-        vstore._collection.delete(ids=existing["ids"])
+    if vstore:
+        vstore.delete_doc(filename)
 
 def native_query_documents(question, doc_name=None):
     from langchain_core.prompts import ChatPromptTemplate
@@ -109,12 +149,7 @@ def native_query_documents(question, doc_name=None):
     if not vstore or not llm:
         raise Exception(f"AI Engine Error: {err or 'GOOGLE_API_KEY missing.'}")
         
-    search_kwargs = {"k": 3}
-    if doc_name:
-        search_kwargs["filter"] = {"doc_name": doc_name}
-        
-    retriever = vstore.as_retriever(search_kwargs=search_kwargs)
-    docs = retriever.invoke(question)
+    docs = vstore.search(question, doc_name=doc_name, k=3)
     if not docs:
         return {"answer": "I could not find anything relevant in the selected document.", "citations": []}
         
@@ -251,7 +286,7 @@ uploaded_files = st.sidebar.file_uploader(
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_documents(cache_key=0):
     try:
-        r = requests.get(f"{BACKEND_URL}/documents", timeout=3)
+        r = requests.get(f"{BACKEND_URL}/documents", timeout=2)
         if r.status_code == 200:
             return r.json().get("documents", [])
     except Exception:
@@ -265,7 +300,7 @@ if uploaded_files:
                 processed = False
                 try:
                     files = {"file": (uf.name, uf.getvalue(), "application/pdf")}
-                    response = requests.post(f"{BACKEND_URL}/upload", files=files, timeout=5)
+                    response = requests.post(f"{BACKEND_URL}/upload", files=files, timeout=2)
                     if response.status_code == 200:
                         st.sidebar.success(response.json().get("message", "Success!"))
                         st.session_state["active_doc"] = response.json().get("doc_name")
@@ -290,7 +325,7 @@ st.sidebar.markdown("### ⚙️ System Parameters")
 metrics = [
     ("LLM Generation Engine", "Gemini 1.5 Flash"),
     ("Vector Dimension Models", "gemini-embedding-001"),
-    ("Vector Database Engine", "ChromaDB (Self-Contained)"),
+    ("Vector Database Engine", "Numpy Cosine Similarity"),
     ("Framework Core", "Streamlit + LangChain")
 ]
 
@@ -380,7 +415,7 @@ with st.container(border=True):
         del_col.markdown("<br>", unsafe_allow_html=True)
         if del_col.button("🗑️ Remove", use_container_width=True):
             try:
-                requests.delete(f"{BACKEND_URL}/documents", params={"doc_name": selected_doc}, timeout=3)
+                requests.delete(f"{BACKEND_URL}/documents", params={"doc_name": selected_doc}, timeout=2)
             except Exception:
                 pass
             native_delete_document(selected_doc)
@@ -419,7 +454,7 @@ if submit_button:
         with st.spinner("Retrieving context and generating answer..."):
             data = None
             try:
-                r = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=5)
+                r = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=2)
                 if r.status_code == 200:
                     data = r.json()
             except Exception:
