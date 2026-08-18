@@ -7,33 +7,40 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Load Google API Key from environment or Streamlit Secrets
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY and hasattr(st, "secrets") and "GOOGLE_API_KEY" in st.secrets:
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+def get_api_key():
+    key = os.getenv("GOOGLE_API_KEY")
+    if not key:
+        try:
+            if hasattr(st, "secrets") and "GOOGLE_API_KEY" in st.secrets:
+                key = st.secrets["GOOGLE_API_KEY"]
+        except Exception:
+            pass
+    if key:
+        os.environ["GOOGLE_API_KEY"] = key
+        os.environ["GEMINI_API_KEY"] = key
+    return key
 
 # Native RAG Engine Initializer (In-App Fallback)
 @st.cache_resource
 def init_native_rag():
+    key = get_api_key()
+    if not key:
+        return None, None, None, "GOOGLE_API_KEY missing from environment and Streamlit Secrets."
     try:
         from langchain_community.vectorstores import Chroma
         from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
         
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=key)
         db_dir = os.path.join(tempfile.gettempdir(), "intellidocs_chroma")
         os.makedirs(db_dir, exist_ok=True)
         vector_store = Chroma(persist_directory=db_dir, embedding_function=embeddings)
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
-        return vector_store, embeddings, llm
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=key)
+        return vector_store, embeddings, llm, None
     except Exception as e:
-        print(f"Native RAG init exception: {e}")
-        return None, None, None
+        return None, None, None, str(e)
 
 def native_list_documents():
-    vstore, _, _ = init_native_rag()
+    vstore, _, _, _ = init_native_rag()
     if not vstore:
         return []
     try:
@@ -52,9 +59,9 @@ def native_process_pdf(file_bytes, filename):
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import Chroma
     
-    vstore, embeddings, _ = init_native_rag()
+    vstore, embeddings, _, err = init_native_rag()
     if not vstore:
-        raise Exception("Google API Key missing or RAG engine not initialized.")
+        raise Exception(f"Initialization Error: {err}")
     
     temp_dir = tempfile.gettempdir()
     file_path = os.path.join(temp_dir, filename)
@@ -88,7 +95,7 @@ def native_process_pdf(file_bytes, filename):
             os.remove(file_path)
 
 def native_delete_document(filename):
-    vstore, _, _ = init_native_rag()
+    vstore, _, _, _ = init_native_rag()
     if not vstore:
         return
     existing = vstore._collection.get(where={"doc_name": filename})
@@ -98,9 +105,9 @@ def native_delete_document(filename):
 def native_query_documents(question, doc_name=None):
     from langchain_core.prompts import ChatPromptTemplate
     
-    vstore, _, llm = init_native_rag()
+    vstore, _, llm, err = init_native_rag()
     if not vstore or not llm:
-        raise Exception("AI Engine not initialized. Ensure GOOGLE_API_KEY is configured.")
+        raise Exception(f"AI Engine Error: {err or 'GOOGLE_API_KEY missing.'}")
         
     search_kwargs = {"k": 3}
     if doc_name:
